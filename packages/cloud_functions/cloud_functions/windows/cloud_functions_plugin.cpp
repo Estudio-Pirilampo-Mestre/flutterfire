@@ -361,7 +361,13 @@ void CloudFunctionsPlugin::Call(
             result(MakeFunctionsError(code, message));
           }
         }
-        delete state->ref;
+        // Do NOT delete state->ref synchronously here — this callback runs on
+        // the transport's own call stack
+        // (BackgroundTransportCurl::CompleteOperation), and deleting the
+        // reference (which owns the transport) here is a use-after-free once
+        // CompleteOperation resumes after this lambda returns. Hop off that
+        // stack with a short-lived thread whose only job is the delete.
+        std::thread([ref = state->ref]() { delete ref; }).detach();
         state->ref = nullptr;
       });
 }
