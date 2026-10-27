@@ -12,9 +12,6 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
-import 'package:flutter_signin_button/flutter_signin_button.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 
 typedef OAuthSignIn = void Function();
 
@@ -59,6 +56,20 @@ extension on AuthMode {
           : 'Register';
 }
 
+enum OAuthButton {
+  apple('Apple'),
+  google('Google'),
+  github('GitHub'),
+  microsoft('Microsoft'),
+  twitter('Twitter'),
+  yahoo('Yahoo'),
+  facebook('Facebook');
+
+  const OAuthButton(this.providerName);
+
+  final String providerName;
+}
+
 /// Entrypoint example for various sign-in flows with Firebase.
 class AuthGate extends StatefulWidget {
   // ignore: public_member_api_docs
@@ -87,7 +98,7 @@ class _AuthGateState extends State<AuthGate> {
     });
   }
 
-  late Map<Buttons, OAuthSignIn> authButtons;
+  late Map<OAuthButton, OAuthSignIn> authButtons;
 
   @override
   void initState() {
@@ -100,33 +111,38 @@ class _AuthGateState extends State<AuthGate> {
 
     if (!kIsWeb && Platform.isMacOS) {
       authButtons = {
-        Buttons.Apple: () => _handleMultiFactorException(
+        OAuthButton.apple: () => _handleMultiFactorException(
               _signInWithApple,
             ),
       };
     } else {
       authButtons = {
-        Buttons.Apple: () => _handleMultiFactorException(
+        OAuthButton.apple: () => _handleMultiFactorException(
               _signInWithApple,
             ),
-        Buttons.Google: () => _handleMultiFactorException(
-              _signInWithGoogle,
-            ),
-        Buttons.GitHub: () => _handleMultiFactorException(
+        // signInWithProvider has no Google flow on Windows.
+        if (kIsWeb || !Platform.isWindows)
+          OAuthButton.google: () => _handleMultiFactorException(
+                _signInWithGoogle,
+              ),
+        OAuthButton.github: () => _handleMultiFactorException(
               _signInWithGitHub,
             ),
-        Buttons.Microsoft: () => _handleMultiFactorException(
+        OAuthButton.microsoft: () => _handleMultiFactorException(
               _signInWithMicrosoft,
             ),
-        Buttons.Twitter: () => _handleMultiFactorException(
+        OAuthButton.twitter: () => _handleMultiFactorException(
               _signInWithTwitter,
             ),
-        Buttons.Yahoo: () => _handleMultiFactorException(
+        OAuthButton.yahoo: () => _handleMultiFactorException(
               _signInWithYahoo,
             ),
-        Buttons.Facebook: () => _handleMultiFactorException(
-              _signInWithFacebook,
-            ),
+        // Firebase signs in with Facebook through the web SDK only; Android
+        // and iOS would need the Facebook SDK.
+        if (kIsWeb)
+          OAuthButton.facebook: () => _handleMultiFactorException(
+                _signInWithFacebook,
+              ),
       };
     }
   }
@@ -254,9 +270,11 @@ class _AuthGateState extends State<AuthGate> {
                                         : SizedBox(
                                             width: double.infinity,
                                             height: 50,
-                                            child: SignInButton(
-                                              button,
+                                            child: OutlinedButton(
                                               onPressed: authButtons[button],
+                                              child: Text(
+                                                'Sign in with ${button.providerName}',
+                                              ),
                                             ),
                                           ),
                                   ),
@@ -544,42 +562,17 @@ class _AuthGateState extends State<AuthGate> {
   }
 
   Future<void> _signInWithGoogle() async {
-    // Trigger the authentication flow
-    final googleUser = await GoogleSignIn().signIn();
+    final googleProvider = GoogleAuthProvider();
 
-    // Obtain the auth details from the request
-    final googleAuth = await googleUser?.authentication;
-
-    if (googleAuth != null) {
-      // Create a new credential
-      final credential = GoogleAuthProvider.credential(
-        accessToken: googleAuth.accessToken,
-        idToken: googleAuth.idToken,
-      );
-
-      // Once signed in, return the UserCredential
-      await auth.signInWithCredential(credential);
+    if (kIsWeb) {
+      await auth.signInWithPopup(googleProvider);
+    } else {
+      await auth.signInWithProvider(googleProvider);
     }
   }
 
   Future<void> _signInWithFacebook() async {
-    // Trigger the authentication flow
-    // by default we request the email and the public profile
-    final LoginResult result = await FacebookAuth.instance.login();
-
-    if (result.status == LoginStatus.success) {
-      // Get access token
-      final AccessToken accessToken = result.accessToken!;
-
-      // Login with token
-      await auth.signInWithCredential(
-        FacebookAuthProvider.credential(accessToken.tokenString),
-      );
-    } else {
-      print('Facebook login did not succeed');
-      print(result.status);
-      print(result.message);
-    }
+    await auth.signInWithPopup(FacebookAuthProvider());
   }
 }
 

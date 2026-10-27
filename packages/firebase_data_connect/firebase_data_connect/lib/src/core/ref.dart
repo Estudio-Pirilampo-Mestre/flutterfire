@@ -338,17 +338,82 @@ class QueryRef<Data, Variables> extends OperationRef<Data, Variables> {
   Stream<ServerResponse>? _serverStream;
   StreamSubscription<ServerResponse>? _serverStreamSubscription;
 
+  /// True from the moment [_streamFromServer] is entered until it has either
+  /// installed [_serverStream] or given up.
+  ///
+  /// [_streamFromServer] awaits a token refresh before it can assign
+  /// [_serverStream], so `_serverStream == null` is *not* a usable "no stream
+  /// yet" test for callers racing inside that window.
+  bool _serverStreamStarting = false;
+
+  /// Bumped whenever the current server stream is torn down, so a
+  /// [_streamFromServer] call that is still starting up can tell that its
+  /// result is no longer wanted and avoid installing an unreachable stream.
+  int _serverStreamGeneration = 0;
+
+  bool get _hasServerStream => _serverStream != null || _serverStreamStarting;
+
+  /// The last result published to this ref's subscribers while its server
+  /// stream was live, whether it came from that stream or from [execute].
+  ///
+  /// The server only pushes when the data changes, so this is replayed to a
+  /// subscriber that joins a server stream which is already live. It is only
+  /// kept when no cache is configured: with a cache, [subscribe] reads the
+  /// cache instead. A replayed result is the original object, so it keeps the
+  /// [DataSource] it was published with.
+  QueryResult<Data, Variables>? _lastResult;
+
+  /// The auth uid that was current when [_lastResult] was published.
+  ///
+  /// After a user switch the transport keeps the server stream open until it
+  /// has reconnected as the new user, so [_lastResult] can still be the
+  /// previous user's data.
+  String? _lastResultUid;
+
+  String? get _currentUid => dataConnect.auth?.currentUser?.uid;
+
   void _onAllSubscribersCancelled() {
+    _serverStreamGeneration++;
+    _serverStreamStarting = false;
     _serverStreamSubscription?.cancel();
     _serverStreamSubscription = null;
     _serverStream = null;
+    _lastResult = null;
   }
 
   Stream<QueryResult<Data, Variables>> subscribe() {
     _streamController ??= _queryManager.addQuery(this);
 
-    final stream =
-        _streamController!.stream.cast<QueryResult<Data, Variables>>();
+    // A ref can be subscribed again after all of its previous subscribers went
+    // away, in which case `addQuery` above is skipped and the QueryManager no
+    // longer tracks this ref. Re-register it, otherwise
+    // `FirebaseDataConnect.query()` hands out a *different* ref for the same
+    // query while this one is still live, and each of them opens its own
+    // server stream for one logical subscription.
+    _queryManager.trackedQueries[operationId] = this;
+
+    final source = _streamController!.stream;
+    final stream = Stream<QueryResult<Data, Variables>>.multi((controller) {
+      // Without a cache, nothing else gives a listener that joins a live
+      // server stream its first result, so replay the last one to it alone.
+      // With a cache, the cache read below already does that.
+      final lastResult = _lastResult;
+      if (dataConnect.cacheManager == null &&
+          _hasServerStream &&
+          lastResult != null &&
+          _lastResultUid == _currentUid) {
+        controller.add(lastResult);
+      }
+      final subscription = source.listen(
+        controller.addSync,
+        onError: controller.addErrorSync,
+        onDone: controller.closeSync,
+      );
+      controller
+        ..onPause = subscription.pause
+        ..onResume = subscription.resume
+        ..onCancel = subscription.cancel;
+    }, isBroadcast: true);
 
     // Return the stream to the caller, then execute fetches
     Future.microtask(() async {
@@ -362,7 +427,7 @@ class QueryRef<Data, Variables> extends OperationRef<Data, Variables> {
       }
 
       // Initiate Web Socket stream only if not already streaming
-      if (_serverStream == null) {
+      if (!_hasServerStream) {
         _streamFromServer();
       }
     });
@@ -371,8 +436,26 @@ class QueryRef<Data, Variables> extends OperationRef<Data, Variables> {
   }
 
   void _streamFromServer() async {
+    // Guard synchronously: two `subscribe()` calls for the same query resolve
+    // to this same ref and both queue a microtask, so without this both would
+    // reach here while `_serverStream` is still null and open two server
+    // streams. Only one of them would ever be reachable for cancellation; the
+    // other leaks for the lifetime of the process, holding the transport's
+    // subscription open so every later subscribe to this query silently
+    // multiplexes onto it and never receives a first event.
+    if (_hasServerStream) return;
+    _serverStreamStarting = true;
+    _lastResult = null;
+    final generation = _serverStreamGeneration;
+
     bool shouldRetry = await _shouldRetry();
     try {
+      if (generation != _serverStreamGeneration) {
+        // Every subscriber went away while we were starting up. Do not install
+        // the stream: nothing would ever cancel it.
+        return;
+      }
+
       _serverStream = _transport.invokeStreamQuery<Data, Variables>(
         operationId,
         operationName,
@@ -423,10 +506,16 @@ class QueryRef<Data, Variables> extends OperationRef<Data, Variables> {
       _serverStream = null;
       log("QueryRef $operationId _streamFromServer loop Unknown loop failure: $e");
       publishErrorToStream(e);
+    } finally {
+      _serverStreamStarting = false;
     }
   }
 
   void publishResultToStream(QueryResult<Data, Variables> result) {
+    // Only keep what `subscribe` can replay.
+    final replayable = dataConnect.cacheManager == null && _hasServerStream;
+    _lastResult = replayable ? result : null;
+    _lastResultUid = replayable ? _currentUid : null;
     if (_streamController != null) {
       _streamController?.add(result);
     }

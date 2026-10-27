@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import DeviceCheck
 import FirebaseAppCheck
 import FirebaseCore
 
@@ -19,9 +20,6 @@ import FirebaseCore
 
 let kFirebaseAppCheckChannelName = "plugins.flutter.io/firebase_app_check"
 let kFirebaseAppCheckTokenChannelPrefix = "plugins.flutter.io/firebase_app_check/token/"
-
-// swift-format-ignore: AvoidRetroactiveConformances
-extension FlutterError: @retroactive Error {}
 
 public class FirebaseAppCheckPlugin: NSObject, FlutterPlugin,
   FLTFirebasePluginProtocol, FirebaseAppCheckHostApi
@@ -244,7 +242,7 @@ public class FirebaseAppCheckPlugin: NSObject, FlutterPlugin,
   }
 
   public func firebaseLibraryName() -> String {
-    "flutter-fire-appcheck"
+    "flutter-fire-app-check"
   }
 
   public func firebaseLibraryVersion() -> String {
@@ -371,11 +369,16 @@ class AppCheckProviderWrapper: NSObject, AppCheckProvider {
         delegateProvider = AppCheckDebugProvider(app: app)
       }
     case "appAttestWithDeviceCheckFallback":
-      if #available(iOS 14.0, macOS 14.0, *) {
-        delegateProvider = AppAttestProvider(app: app)
-      } else {
-        delegateProvider = DeviceCheckProvider(app: app)
+      // A new enough OS is not sufficient: the device must also support App
+      // Attest, which is often false on macOS. The SDK only reports that when a
+      // token is first requested, so check the same capability it checks —
+      // otherwise this provider never actually falls back. Typed as the
+      // protocol to keep the availability-annotated type inside `#available`.
+      var appAttestProvider: (any AppCheckProvider)?
+      if #available(iOS 14.0, macOS 14.0, *), DCAppAttestService.shared.isSupported {
+        appAttestProvider = AppAttestProvider(app: app)
       }
+      delegateProvider = appAttestProvider ?? DeviceCheckProvider(app: app)
     case "recaptcha":
       #if os(iOS)
         if let recaptchaSiteKey {
@@ -409,5 +412,27 @@ class AppCheckProviderWrapper: NSObject, AppCheckProvider {
       return
     }
     delegateProvider.getToken(completion: handler)
+  }
+
+  // `getLimitedUseToken(completion:)` is optional on `AppCheckProvider`. Without
+  // forwarding it, FirebaseAppCheck falls back to `getToken` and
+  // `getLimitedUseToken()` returns standard (reusable) tokens, which services
+  // with replay protection enforced (e.g. Firebase AI Logic) reject.
+  func getLimitedUseToken(completion handler: @escaping (AppCheckToken?, Error?) -> Void) {
+    guard let delegateProvider else {
+      handler(
+        nil,
+        NSError(
+          domain: "firebase_app_check", code: -1,
+          userInfo: [NSLocalizedDescriptionKey: "Provider not configured"]
+        )
+      )
+      return
+    }
+    if let getLimitedUseToken = delegateProvider.getLimitedUseToken {
+      getLimitedUseToken(handler)
+    } else {
+      delegateProvider.getToken(completion: handler)
+    }
   }
 }
