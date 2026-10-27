@@ -12,7 +12,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
-import '../platform_utils.dart';
+import '../../../../../tests/integration_test/platform_utils.dart';
 import 'report_test_results.dart';
 import 'sample_data.dart' as data;
 
